@@ -7,6 +7,7 @@ Check a self-hosted [Dify](https://github.com/langgenius/dify) deployment, in on
 - Dify's known security advisories.
 
 - Reads `docker/.env`, `docker/docker-compose.yaml`, the `docker/envs/*.env` files, `docker inspect` output or a Kubernetes manifest. It can also check the address of a server you run.
+- Runs as a GitHub Action, so a pull request that brings a default password back fails before it ships.
 - One Python file, standard library only, read-only. **Secret values are never printed.** It reports only the *names* of settings that still hold a published default, such as `DB_PASSWORD`.
 
 Made with AI agents for MV2 of Munim, Inc. Defaults and advisory data were checked on 14 October 2026 against Dify 1.17.1.
@@ -41,12 +42,13 @@ Options:
 Example output (shortened):
 
 ```
-Dify hardening check 0.1.1
+Dify hardening check 0.1.2
 Checked: docker-compose.middleware.yaml, .env
 Dify version: unknown
 
 CRITICAL  PostgreSQL is published on every network interface (host port 5432) with a published default credential
           DB_PASSWORD is still Dify's published default, so anyone who can reach the port can use it.
+          This is the setup CVE-2025-56157 (CVSS 9.8) describes.
           Fix: Remove the port mapping, or publish it as "127.0.0.1:5432:5432". ...
 CRITICAL  The Dify Agent local sandbox is published on every network interface (host port 5004) without an access token
 CRITICAL  The code sandbox (through the SSRF proxy) is published on every network interface (host port 8194) ...
@@ -58,6 +60,55 @@ LOW       No init password (INIT_PASSWORD is empty)
 ...
 ```
 
+## CVE-2025-56157: am I affected?
+
+[CVE-2025-56157](https://nvd.nist.gov/vuln/detail/CVE-2025-56157) (CVSS 9.8, published 18 December 2025) is about the PostgreSQL username and password in Dify's `docker/docker-compose.yaml`: anyone who can reach port 5432 can sign in to the database with the published password. The record lists Dify "through 1.5.1". Dify notes that its Docker setup doesn't publish 5432 by default since 1.0.1.
+
+Scanners often show this CVE with **no fixed version**, because updating doesn't help: Dify 1.17.1's example env file still ships the same `DB_PASSWORD`, and Postgres keeps the password it was created with. What matters is your setup:
+
+| Your setup | Risk | What the tool reports |
+|---|---|---|
+| `DB_PASSWORD` is still the published default **and** 5432 is published on every interface (for example by `docker-compose.middleware.yaml`, or a `ports:` line you added) | The CVE applies as written | critical, naming CVE-2025-56157 |
+| `DB_PASSWORD` is still the default, 5432 isn't published | Only containers and plugins inside the Docker network can use it | medium, naming CVE-2025-56157 |
+| You changed the password, 5432 is still published | Exposed, but not with a known password | high: bind it to `127.0.0.1` |
+| You changed the password, 5432 isn't published | Not affected | nothing |
+
+Check it:
+
+```sh
+cd dify/docker
+python3 /path/to/dify_hardening_check.py .env docker-compose.yaml docker-compose.middleware.yaml
+```
+
+To fix it, follow [ROTATE.md](ROTATE.md). Change the password inside Postgres first (`\password` through `docker compose exec`), then in `DB_PASSWORD`, then restart. If you publish 5432, bind it to `127.0.0.1:5432:5432`.
+
+## In CI (GitHub Actions)
+
+If your Dify deployment files (an `.env` template, compose overrides, Kubernetes manifests) live in a repository, check them on every push and pull request:
+
+```yaml
+# .github/workflows/dify-hardening.yml
+name: Dify hardening
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: munimv2/dify-hardening-check@v0.1.2
+        with:
+          files: docker/.env docker/docker-compose.yaml docker/envs/*.env   # spaces or new lines; wildcards work
+          fail-on: high                                                      # critical, high, medium, low or never
+```
+
+- The report goes to the job log and the job summary. Critical and high findings become error annotations, medium ones warnings.
+- The step fails when a finding is at least as severe as `fail-on`.
+- Outputs: `report` (path of the JSON report) and the counts `critical`, `high`, `medium` and `low`.
+- Files that don't exist are skipped with a warning.
+- `url` also works. Only use it for a server you run, and keep in mind that the job summary shows the address.
+
+It needs Python 3, which GitHub's Linux and macOS runners have. Pin a release tag (`@v0.1.2`) and update on purpose.
+
 ## What it checks
 
 From your files:
@@ -65,7 +116,7 @@ From your files:
 | Area | Checks |
 |---|---|
 | Secret key | `SECRET_KEY` is the public key from the old example file, a placeholder, or shorter than 32 characters. It also flags an empty key on versions before 1.14.1, whose compose file filled it with the public key. |
-| Published defaults | `DB_PASSWORD`, `REDIS_PASSWORD` (also inside `CELERY_BROKER_URL`), `SANDBOX_API_KEY` / `CODE_EXECUTION_API_KEY`, `PLUGIN_DAEMON_KEY`, `PLUGIN_DIFY_INNER_API_KEY`, `DIFY_AGENT_API_TOKEN`, `DIFY_AGENT_SERVER_SECRET_KEY`, plus the credentials of the vector store selected in `VECTOR_STORE`. Placeholders for services you don't use are listed separately as info. |
+| Published defaults | `DB_PASSWORD` (CVE-2025-56157), `REDIS_PASSWORD` (also inside `CELERY_BROKER_URL`), `SANDBOX_API_KEY` / `CODE_EXECUTION_API_KEY`, `PLUGIN_DAEMON_KEY`, `PLUGIN_DIFY_INNER_API_KEY`, `DIFY_AGENT_API_TOKEN`, `DIFY_AGENT_SERVER_SECRET_KEY`, plus the credentials of the vector store selected in `VECTOR_STORE`. Placeholders for services you don't use are listed separately as info. |
 | Agent sandbox | An empty `DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN` (the 1.17 default) while the local sandbox backend is used. The sandbox's control API only asks for a token when one is set ([langgenius/dify#38609](https://github.com/langgenius/dify/issues/38609)). It also notes a value left under the pre-1.17 name `DIFY_AGENT_SHELLCTL_AUTH_TOKEN`. |
 | Ports | Postgres, MySQL, Redis, the sandbox proxy, the plugin daemon, the agent's local sandbox and vector databases published on every interface. It's critical when the service's credential is still the default, or for the local sandbox when it has no token. The plugin remote-debugging port 5003, which the stock compose file publishes, is flagged as low. |
 | Setup | Empty `INIT_PASSWORD`: until setup is finished, anyone who opens `/install` can create the owner account. |
@@ -108,13 +159,14 @@ Also by MV2: [openwebui-hardening-check](https://github.com/munimv2/openwebui-ha
 ## Development
 
 ```sh
-python3 -m unittest test_dify_hardening_check.py
+python3 -m unittest test_dify_hardening_check.py test_action.py
 ```
 
 MIT licensed. Sources:
 - Dify's [environment variable docs](https://docs.dify.ai/en/self-host/deploy/configuration/environments)
 - the [`docker/.env.example`](https://github.com/langgenius/dify/blob/main/docker/.env.example) and compose files
 - [Dify's security advisories](https://github.com/langgenius/dify/security/advisories)
+- [CVE-2025-56157](https://nvd.nist.gov/vuln/detail/CVE-2025-56157) on the published PostgreSQL password
 - [langgenius/dify#38609](https://github.com/langgenius/dify/issues/38609) on the local sandbox's optional token
 
 Dify is a trademark of LangGenius, Inc. This project isn't affiliated with or endorsed by LangGenius.

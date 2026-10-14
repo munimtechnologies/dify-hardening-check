@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 DATA_DATE = "14 October 2026"
 REPO = "https://github.com/munimv2/dify-hardening-check"
 ENV_DOCS = "https://docs.dify.ai/en/self-host/deploy/configuration/environments"
@@ -27,6 +27,11 @@ ENV_EXAMPLE = "https://github.com/langgenius/dify/blob/main/docker/.env.example"
 ADVISORY_PAGE = "https://github.com/langgenius/dify/security/advisories"
 SHELLCTL_ISSUE = "https://github.com/langgenius/dify/issues/38609"
 PROBE_ORIGIN = "https://cors-check.invalid"
+
+# The CVE for Dify's published PostgreSQL password. It names no fixed version:
+# the example file still ships the password, so only replacing it helps.
+DEFAULT_DB_CVE = "CVE-2025-56157"
+DEFAULT_DB_CVE_URL = "https://nvd.nist.gov/vuln/detail/CVE-2025-56157"
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
 RANK = {s: i for i, s in enumerate(SEVERITIES)}
@@ -88,6 +93,7 @@ SERVICE_PORTS = {
 WEB_PORTS = {"80", "443"}
 DEBUG_PORT = "5003"
 LOCAL_SANDBOX_PORT = "5004"
+POSTGRES_PORT = "5432"
 
 # Dify advisories: [first affected or None, fixed in, ids, summary, source].
 # Checked against the linked advisories on 14 October 2026.
@@ -382,11 +388,14 @@ def check_env(env, version=None):
 
     used, other = default_credentials(env)
     if used:
+        db = [n for n in ("DB_PASSWORD", "POSTGRES_PASSWORD") if n in used]
+        cve = (" %s holds the published database password that %s (CVSS 9.8) is about. Dify's example file still ships it, so updating Dify doesn't change it."
+               % (db[0], DEFAULT_DB_CVE)) if db else ""
         out.append(finding(
             "medium", "%d passwords and keys still have Dify's published default values" % len(used) if len(used) > 1
             else "A password or key still has Dify's published default value",
             "Replace each with a random value (`openssl rand -hex 32`; hex stays valid inside CELERY_BROKER_URL) in docker/.env and restart. Postgres keeps the password it was created with, so for an existing database change it there first (ALTER USER ... WITH PASSWORD) and then in DB_PASSWORD. Change PLUGIN_DAEMON_KEY and the sandbox keys on both sides together. Step by step: %s/blob/main/ROTATE.md" % REPO,
-            detail="Settings: %s. Anything that can reach these services inside your network (another container, a plugin, a port published by mistake) can use them; Dify's example file says to replace the agent keys in production." % _names(used),
+            detail="Settings: %s. Anything that can reach these services inside your network (another container, a plugin, a port published by mistake) can use them; Dify's example file says to replace the agent keys in production.%s" % (_names(used), cve),
             setting="credentials", source=ENV_EXAMPLE))
     if other:
         out.append(finding(
@@ -518,18 +527,23 @@ def check_deployment(dep, env):
         service, guard, severity = SERVICE_PORTS.get(container_port, ("A service (container port %s)" % container_port, None, "medium"))
         default = guard is not None and is_default(guard, env.get(guard))
         tokenless = container_port == LOCAL_SANDBOX_PORT and local_sandbox_token(env) is False
+        source = ENV_EXAMPLE
         if default:
             suffix, detail = (" with a published default credential",
                               "%s is still Dify's published default, so anyone who can reach the port can use it." % guard)
+            if container_port == POSTGRES_PORT:
+                detail += " This is the setup %s (CVSS 9.8) describes." % DEFAULT_DB_CVE
+                source = DEFAULT_DB_CVE_URL
         elif tokenless:
             suffix, detail = (" without an access token",
                               "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty, so anyone who can reach the port can use the sandbox's shell control API.")
+            source = SHELLCTL_ISSUE
         else:
             suffix, detail = "", ""
         out.append(finding(
             "critical" if default or tokenless else severity,
             "%s is published on every network interface (host port %s)%s" % (service, host_port, suffix),
-            bind, detail=detail, setting="ports", source=SHELLCTL_ISSUE if tokenless else ENV_EXAMPLE))
+            bind, detail=detail, setting="ports", source=source))
     return out
 
 
