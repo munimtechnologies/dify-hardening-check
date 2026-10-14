@@ -23,7 +23,7 @@ Most guides say "change the defaults". This tool tells you which ones you haven'
 ## Quick start
 
 ```sh
-curl -O https://raw.githubusercontent.com/munimv2/dify-hardening-check/main/dify_hardening_check.py
+curl -O https://raw.githubusercontent.com/munimtechnologies/dify-hardening-check/main/dify_hardening_check.py
 
 cd dify/docker
 python3 /path/to/dify_hardening_check.py .env docker-compose.yaml envs/*.env
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: munimv2/dify-hardening-check@v0.1.2
+      - uses: munimtechnologies/dify-hardening-check@v0.1.2
         with:
           files: docker/.env docker/docker-compose.yaml docker/envs/*.env   # spaces or new lines; wildcards work
           fail-on: high                                                      # critical, high, medium, low or never
@@ -138,7 +138,7 @@ It never signs in, sends a password or changes anything. Only run it against ser
 - **Some values can't be read.** Values that come from elsewhere (`${VAR}` without a value in your files, Kubernetes `valueFrom`, `$(command)`) are treated as unknown and not judged. The agent sandbox check needs `docker/.env` (or the sandbox container's `docker inspect`) to say whether a token is set.
 - **Not a scanner or a certification.** This is general technical information. It doesn't scan networks or test for vulnerabilities.
 
-If a default, a range or an advisory is wrong or out of date, please [open an issue](https://github.com/munimv2/dify-hardening-check/issues).
+If a default, a range or an advisory is wrong or out of date, please [open an issue](https://github.com/munimtechnologies/dify-hardening-check/issues).
 
 ## Written review
 
@@ -154,7 +154,7 @@ After paying, email munimversion2@gmail.com:
 
 The review arrives within 48 hours of receiving everything. MV2 never asks for passwords, keys or remote access, and this tool never prints them.
 
-Also by MV2: [openwebui-hardening-check](https://github.com/munimv2/openwebui-hardening-check), the same kind of check for Open WebUI.
+Also by MV2: [openwebui-hardening-check](https://github.com/munimtechnologies/openwebui-hardening-check), the same kind of check for Open WebUI.
 
 ## Development
 

@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 __version__ = "0.1.2"
 DATA_DATE = "14 October 2026"
-REPO = "https://github.com/munimv2/dify-hardening-check"
+REPO = "https://github.com/munimtechnologies/dify-hardening-check"
 ENV_DOCS = "https://docs.dify.ai/en/self-host/deploy/configuration/environments"
 ENV_EXAMPLE = "https://github.com/langgenius/dify/blob/main/docker/.env.example"
 ADVISORY_PAGE = "https://github.com/langgenius/dify/security/advisories"
