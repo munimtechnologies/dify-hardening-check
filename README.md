@@ -162,7 +162,7 @@ Also by MV2: [openwebui-hardening-check](https://github.com/munimv2/openwebui-ha
 python3 -m unittest test_dify_hardening_check.py test_action.py
 ```
 
-MIT licensed. Sources:
+Apache-2.0 licensed. Sources:
 - Dify's [environment variable docs](https://docs.dify.ai/en/self-host/deploy/configuration/environments)
 - the [`docker/.env.example`](https://github.com/langgenius/dify/blob/main/docker/.env.example) and compose files
 - [Dify's security advisories](https://github.com/langgenius/dify/security/advisories)
