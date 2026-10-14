@@ -19,12 +19,13 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 DATA_DATE = "14 October 2026"
 REPO = "https://github.com/munimv2/dify-hardening-check"
 ENV_DOCS = "https://docs.dify.ai/en/self-host/deploy/configuration/environments"
 ENV_EXAMPLE = "https://github.com/langgenius/dify/blob/main/docker/.env.example"
 ADVISORY_PAGE = "https://github.com/langgenius/dify/security/advisories"
+SHELLCTL_ISSUE = "https://github.com/langgenius/dify/issues/38609"
 PROBE_ORIGIN = "https://cors-check.invalid"
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
@@ -86,6 +87,7 @@ SERVICE_PORTS = {
 }
 WEB_PORTS = {"80", "443"}
 DEBUG_PORT = "5003"
+LOCAL_SANDBOX_PORT = "5004"
 
 # Dify advisories: [first affected or None, fixed in, ids, summary, source].
 # Checked against the linked advisories on 14 October 2026.
@@ -324,6 +326,25 @@ def default_credentials(env):
     return used, other
 
 
+def local_sandbox_token(env):
+    """True when Dify Agent's local sandbox gets an access token, False when it gets
+    none, None when that can't be seen or another sandbox backend is used.
+    The compose files pass ${DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN:-${DIFY_AGENT_SHELLCTL_AUTH_TOKEN:-}}
+    (the name before 1.17) to the sandbox as SHELLCTL_AUTH_TOKEN."""
+    if (env.get("DIFY_AGENT_RUNTIME_BACKEND") or "local").strip().lower() != "local":
+        return None
+    names = ("DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN", "SHELLCTL_AUTH_TOKEN")
+    if any((env.get(n) or "").strip() for n in names):
+        return True
+    if env.get("SHELLCTL_AUTH_TOKEN") == "":
+        return False               # docker inspect of the sandbox container
+    if env.get("DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN") != "":
+        return None                # not in the files given, or set somewhere else
+    if "DIFY_AGENT_SHELLCTL_AUTH_TOKEN" in env and env["DIFY_AGENT_SHELLCTL_AUTH_TOKEN"] is None:
+        return None
+    return False
+
+
 def _names(names, limit=12):
     if len(names) <= limit:
         return ", ".join(names)
@@ -364,7 +385,7 @@ def check_env(env, version=None):
         out.append(finding(
             "medium", "%d passwords and keys still have Dify's published default values" % len(used) if len(used) > 1
             else "A password or key still has Dify's published default value",
-            "Replace each with a random value (`openssl rand -base64 32`) in docker/.env and restart. Postgres keeps the password it was created with, so for an existing database change it there first (ALTER USER ... WITH PASSWORD) and then in DB_PASSWORD. Change PLUGIN_DAEMON_KEY and the sandbox keys on both sides together.",
+            "Replace each with a random value (`openssl rand -hex 32`; hex stays valid inside CELERY_BROKER_URL) in docker/.env and restart. Postgres keeps the password it was created with, so for an existing database change it there first (ALTER USER ... WITH PASSWORD) and then in DB_PASSWORD. Change PLUGIN_DAEMON_KEY and the sandbox keys on both sides together. Step by step: %s/blob/main/ROTATE.md" % REPO,
             detail="Settings: %s. Anything that can reach these services inside your network (another container, a plugin, a port published by mistake) can use them; Dify's example file says to replace the agent keys in production." % _names(used),
             setting="credentials", source=ENV_EXAMPLE))
     if other:
@@ -372,6 +393,18 @@ def check_env(env, version=None):
             "info", "Placeholder values remain for services you may not use",
             "Only matters if you switch to these services; then give them real credentials.",
             detail="Settings: %s." % _names(other), setting="credentials", source=ENV_EXAMPLE))
+
+    if local_sandbox_token(env) is False:
+        out.append(finding(
+            "medium", "Dify Agent's local sandbox has no access token (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty, the default)",
+            "Set DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN in docker/.env to a random value (`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`) and run `docker compose up -d`. The compose file gives the same value to agent_backend and to local_sandbox (as SHELLCTL_AUTH_TOKEN).",
+            detail="The sandbox's control API (shellctl) asks for a bearer token only when one is set. Without it, anything that can reach the sandbox, including code running in an agent's shell job, can call that API directly and bypass Dify's per-session tracking of shell jobs (langgenius/dify#38609).",
+            setting="DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN", source=SHELLCTL_ISSUE))
+    if (env.get("DIFY_AGENT_SHELLCTL_AUTH_TOKEN") or "").strip() and env.get("DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN") == "":
+        out.append(finding(
+            "info", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN was renamed in Dify 1.17",
+            "Move the value to DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN. The compose file still falls back to the old name, but setup scripts and Helm values that only fill the new name leave the sandbox without a token.",
+            setting="DIFY_AGENT_SHELLCTL_AUTH_TOKEN", source=ENV_EXAMPLE))
 
     if env.get("INIT_PASSWORD") == "":
         out.append(finding(
@@ -484,13 +517,19 @@ def check_deployment(dep, env):
             continue
         service, guard, severity = SERVICE_PORTS.get(container_port, ("A service (container port %s)" % container_port, None, "medium"))
         default = guard is not None and is_default(guard, env.get(guard))
+        tokenless = container_port == LOCAL_SANDBOX_PORT and local_sandbox_token(env) is False
+        if default:
+            suffix, detail = (" with a published default credential",
+                              "%s is still Dify's published default, so anyone who can reach the port can use it." % guard)
+        elif tokenless:
+            suffix, detail = (" without an access token",
+                              "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty, so anyone who can reach the port can use the sandbox's shell control API.")
+        else:
+            suffix, detail = "", ""
         out.append(finding(
-            "critical" if default else severity,
-            "%s is published on every network interface (host port %s)%s" % (
-                service, host_port, " with a published default credential" if default else ""),
-            bind,
-            detail="%s is still Dify's published default, so anyone who can reach the port can use it." % guard if default else "",
-            setting="ports", source=ENV_EXAMPLE))
+            "critical" if default or tokenless else severity,
+            "%s is published on every network interface (host port %s)%s" % (service, host_port, suffix),
+            bind, detail=detail, setting="ports", source=SHELLCTL_ISSUE if tokenless else ENV_EXAMPLE))
     return out
 
 

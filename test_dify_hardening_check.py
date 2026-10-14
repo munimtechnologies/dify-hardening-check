@@ -52,6 +52,9 @@ SSRF_PROXY_HTTP_URL=http://ssrf_proxy:3128
 """ % {"weaviate": dhc.PUBLISHED_KEYS["WEAVIATE_API_KEY"], "daemon": dhc.PUBLISHED_KEYS["PLUGIN_DAEMON_KEY"],
        "agent": dhc.PUBLISHED_KEYS["DIFY_AGENT_API_TOKEN"]}
 
+# The Dify Agent lines of docker/.env.example in 1.17.1.
+AGENT_ENV = "DIFY_AGENT_RUNTIME_BACKEND=local\nDIFY_AGENT_LOCAL_SANDBOX_ENDPOINT=http://local_sandbox:5004\nDIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN=\n"
+
 # Shortened from Dify's docker/docker-compose.yaml.
 COMPOSE = """services:
   api:
@@ -95,6 +98,18 @@ MIDDLEWARE = """services:
     image: cr.weaviate.io/semitechnologies/weaviate:1.39.2
     ports:
       - 8080:8080
+"""
+
+# The local sandbox and agent backend of the 1.17.1 compose files.
+LOCAL_SANDBOX = """  local_sandbox:
+    image: langgenius/dify-agent-local-sandbox:1.17.1
+    environment:
+      - SHELLCTL_AUTH_TOKEN=${DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN:-${DIFY_AGENT_SHELLCTL_AUTH_TOKEN:-}}
+    ports:
+      - "${EXPOSE_LOCAL_SANDBOX_PORT:-5004}:5004"
+  agent_backend:
+    environment:
+      DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN: ${DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN:-${DIFY_AGENT_SHELLCTL_AUTH_TOKEN:-}}
 """
 
 K8S = """        env:
@@ -174,6 +189,7 @@ class EnvCheckTests(unittest.TestCase):
         creds = [f for f in found if f["setting"] == "credentials"]
         self.assertEqual([f["severity"] for f in creds], ["medium", "info"])
         self.assertEqual(creds[0]["title"], "8 passwords and keys still have Dify's published default values")
+        self.assertIn("ROTATE.md", creds[0]["fix"])
         for name in ("DB_PASSWORD", "CELERY_BROKER_URL", "WEAVIATE_API_KEY", "DIFY_AGENT_API_TOKEN"):
             self.assertIn(name, creds[0]["detail"])
         self.assertNotIn("WEAVIATE_AUTHENTICATION_APIKEY_USERS", creds[0]["detail"])
@@ -194,16 +210,19 @@ class EnvCheckTests(unittest.TestCase):
         self.assertEqual([f for f in dhc.check_env({"SECRET_KEY": "x" * 56}) if f["setting"] == "SECRET_KEY"], [])
 
     def test_secrets_never_printed(self):
-        env = dhc.effective_env(dhc.parse_text(ENV + "SECRET_KEY=abcdefgh\n", ".env"))
+        env = dhc.effective_env(dhc.parse_text(
+            ENV + "SECRET_KEY=abcdefgh\nDIFY_AGENT_SHELLCTL_AUTH_TOKEN=old-token-value-123\n"
+            "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN=\n", ".env"))
         text = json.dumps(dhc.check_env(env))
-        for value in ["difyai123456", "dify-sandbox", "abcdefgh"] + list(dhc.PUBLISHED_VALUES):
+        for value in ["difyai123456", "dify-sandbox", "abcdefgh", "old-token-value-123"] + list(dhc.PUBLISHED_VALUES):
             self.assertNotIn(value, text)
 
     def test_changed_credentials_and_hardened_settings(self):
         env = {"DB_PASSWORD": "q8Vh2mZ0rT4w", "REDIS_PASSWORD": "Lk3pX9sQ1n", "SECRET_KEY": "k" * 56,
                "INIT_PASSWORD": "set", "CONSOLE_CORS_ALLOW_ORIGINS": "https://dify.example.com",
                "WEB_API_CORS_ALLOW_ORIGINS": "https://www.example.com",
-               "CONSOLE_WEB_URL": "https://dify.example.com", "APP_WEB_URL": "https://dify.example.com"}
+               "CONSOLE_WEB_URL": "https://dify.example.com", "APP_WEB_URL": "https://dify.example.com",
+               "DIFY_AGENT_RUNTIME_BACKEND": "local", "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": "f0e1d2c3b4a5"}
         self.assertEqual(dhc.check_env(env), [])
 
     def test_vector_store_selects_credentials(self):
@@ -225,6 +244,48 @@ class EnvCheckTests(unittest.TestCase):
         self.assertIn("(CONSOLE_WEB_URL)", [f for f in found if f["setting"] == "https"][0]["title"])
         self.assertTrue({"ALLOW_EMBED", "DEBUG", "DEPLOY_ENV", "ENABLE_REQUEST_LOGGING"} <= settings(by_severity(found, "low")))
         self.assertIn("Set DEBUG=false and FLASK_DEBUG=false", [f for f in found if f["setting"] == "DEBUG"][0]["fix"])
+
+
+class LocalSandboxTests(unittest.TestCase):
+    def test_token(self):
+        self.assertIsNone(dhc.local_sandbox_token({}))
+        self.assertIs(dhc.local_sandbox_token({"DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": ""}), False)
+        self.assertTrue(dhc.local_sandbox_token({"DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": "", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN": "x1"}))
+        self.assertIsNone(dhc.local_sandbox_token({"DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": "", "DIFY_AGENT_RUNTIME_BACKEND": "e2b"}))
+        self.assertIsNone(dhc.local_sandbox_token({"DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": None}))
+        self.assertIsNone(dhc.local_sandbox_token({"DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": "", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN": None}))
+        self.assertIs(dhc.local_sandbox_token({"SHELLCTL_AUTH_TOKEN": ""}), False)   # docker inspect of the sandbox
+
+    def test_stock_117_env(self):
+        env = dhc.effective_env(dhc.parse_text(ENV + AGENT_ENV, ".env"))
+        found = [f for f in dhc.check_env(env) if f["setting"] == "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN"]
+        self.assertEqual([f["severity"] for f in found], ["medium"])
+        self.assertIn("38609", found[0]["source"])
+
+    def test_compose_nested_reference_is_unknown_until_env_says(self):
+        compose = dhc.parse_text("services:\n" + LOCAL_SANDBOX, "docker-compose.yaml")
+        self.assertIsNone(compose.env["SHELLCTL_AUTH_TOKEN"])
+        self.assertIsNone(dhc.local_sandbox_token(dhc.effective_env(compose)))
+        dep = dhc.merge([compose, dhc.parse_text(AGENT_ENV, ".env")])
+        self.assertIs(dhc.local_sandbox_token(dhc.effective_env(dep)), False)
+
+    def test_old_name_is_noted(self):
+        env = {"DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN": "", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN": "a9b8c7"}
+        found = dhc.check_env(env)
+        self.assertEqual([(f["severity"], f["setting"]) for f in found if "SANDBOX" in f["setting"] or "SHELLCTL" in f["setting"]],
+                         [("info", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN")])
+
+    def test_published_port_without_token_is_critical(self):
+        middleware = MIDDLEWARE + LOCAL_SANDBOX
+        dep = dhc.merge([dhc.parse_text(middleware, "docker-compose.middleware.yaml"), dhc.parse_text(ENV + AGENT_ENV, ".env")])
+        found = [f for f in dhc.check_deployment(dep, dhc.effective_env(dep)) if "local sandbox" in f["title"]]
+        self.assertEqual(found[0]["severity"], "critical")
+        self.assertIn("(host port 5004) without an access token", found[0]["title"])
+        dep = dhc.merge([dhc.parse_text(middleware, "m.yaml"),
+                         dhc.parse_text(AGENT_ENV.replace("AUTH_TOKEN=", "AUTH_TOKEN=f0e1d2c3b4a5"), ".env")])
+        found = [f for f in dhc.check_deployment(dep, dhc.effective_env(dep)) if "local sandbox" in f["title"]]
+        self.assertEqual(found[0]["severity"], "high")
+        self.assertEqual(found[0]["detail"], "")
 
 
 class DeploymentTests(unittest.TestCase):

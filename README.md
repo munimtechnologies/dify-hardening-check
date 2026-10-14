@@ -11,11 +11,13 @@ Check a self-hosted [Dify](https://github.com/langgenius/dify) deployment, in on
 
 Made with AI agents for MV2 of Munim, Inc. Defaults and advisory data were checked on 14 October 2026 against Dify 1.17.1.
 
+**Found defaults? [ROTATE.md](ROTATE.md) shows how to replace each one without breaking Postgres, Redis or the plugin daemon.**
+
 ## Why
 
-Dify's example env file is public, and so is every value in it: `difyai123456` for Postgres and Redis, `dify-sandbox` for the code sandbox, the plugin daemon keys and the Dify Agent tokens. Before 1.14.1 it also held a fixed `SECRET_KEY`, which signs every sign-in token.
+Dify's example env file is public, and so is every value in it: `difyai123456` for Postgres and Redis, `dify-sandbox` for the code sandbox, the plugin daemon keys and the Dify Agent tokens. Before 1.14.1 it also held a fixed `SECRET_KEY`, which signs every sign-in token. Since 1.17 it also leaves the Dify Agent local sandbox's access token empty.
 
-Most guides say "change the defaults". This tool tells you which ones you haven't changed. It also flags the ports that make them dangerous. One example is `docker-compose.middleware.yaml`, which publishes Postgres, Redis, the sandbox proxy and Weaviate on every network interface.
+Most guides say "change the defaults". This tool tells you which ones you haven't changed. It also flags the ports that make them dangerous. One example is `docker-compose.middleware.yaml`, which publishes Postgres, Redis, the sandbox proxy, the agent's local sandbox and Weaviate on every network interface.
 
 ## Quick start
 
@@ -39,16 +41,18 @@ Options:
 Example output (shortened):
 
 ```
-Dify hardening check 0.1.0
+Dify hardening check 0.1.1
 Checked: docker-compose.middleware.yaml, .env
 Dify version: unknown
 
 CRITICAL  PostgreSQL is published on every network interface (host port 5432) with a published default credential
           DB_PASSWORD is still Dify's published default, so anyone who can reach the port can use it.
           Fix: Remove the port mapping, or publish it as "127.0.0.1:5432:5432". ...
+CRITICAL  The Dify Agent local sandbox is published on every network interface (host port 5004) without an access token
 CRITICAL  The code sandbox (through the SSRF proxy) is published on every network interface (host port 8194) ...
 MEDIUM    8 passwords and keys still have Dify's published default values
           Settings: CELERY_BROKER_URL, CODE_EXECUTION_API_KEY, DB_PASSWORD, DIFY_AGENT_API_TOKEN, ...
+MEDIUM    Dify Agent's local sandbox has no access token (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty, the default)
 MEDIUM    The console API accepts requests from every origin (CONSOLE_CORS_ALLOW_ORIGINS=*, the default)
 LOW       No init password (INIT_PASSWORD is empty)
 ...
@@ -62,7 +66,8 @@ From your files:
 |---|---|
 | Secret key | `SECRET_KEY` is the public key from the old example file, a placeholder, or shorter than 32 characters. It also flags an empty key on versions before 1.14.1, whose compose file filled it with the public key. |
 | Published defaults | `DB_PASSWORD`, `REDIS_PASSWORD` (also inside `CELERY_BROKER_URL`), `SANDBOX_API_KEY` / `CODE_EXECUTION_API_KEY`, `PLUGIN_DAEMON_KEY`, `PLUGIN_DIFY_INNER_API_KEY`, `DIFY_AGENT_API_TOKEN`, `DIFY_AGENT_SERVER_SECRET_KEY`, plus the credentials of the vector store selected in `VECTOR_STORE`. Placeholders for services you don't use are listed separately as info. |
-| Ports | Postgres, MySQL, Redis, the sandbox proxy, the plugin daemon, the agent sandbox and vector databases published on every interface. It's critical when the service's credential is still the default. The plugin remote-debugging port 5003, which the stock compose file publishes, is flagged as low. |
+| Agent sandbox | An empty `DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN` (the 1.17 default) while the local sandbox backend is used. The sandbox's control API only asks for a token when one is set ([langgenius/dify#38609](https://github.com/langgenius/dify/issues/38609)). It also notes a value left under the pre-1.17 name `DIFY_AGENT_SHELLCTL_AUTH_TOKEN`. |
+| Ports | Postgres, MySQL, Redis, the sandbox proxy, the plugin daemon, the agent's local sandbox and vector databases published on every interface. It's critical when the service's credential is still the default, or for the local sandbox when it has no token. The plugin remote-debugging port 5003, which the stock compose file publishes, is flagged as low. |
 | Setup | Empty `INIT_PASSWORD`: until setup is finished, anyone who opens `/install` can create the owner account. |
 | Network and web | `CONSOLE_CORS_ALLOW_ORIGINS=*` and `WEB_API_CORS_ALLOW_ORIGINS=*`; plain `http://` addresses in `CONSOLE_WEB_URL`, `APP_WEB_URL` and the like; `NGINX_HTTPS_ENABLED=false`; an empty `SSRF_PROXY_HTTP_URL`; `ALLOW_UNSAFE_DATA_SCHEME`; `ALLOW_EMBED` |
 | Plugins and debugging | `FORCE_VERIFYING_SIGNATURE=false`; `DEBUG`, `FLASK_DEBUG`, `DEPLOY_ENV=DEVELOPMENT`, `ENABLE_REQUEST_LOGGING` |
@@ -79,7 +84,7 @@ It never signs in, sends a password or changes anything. Only run it against ser
 ## Limits
 
 - **Settings are read as one flat list.** If two services in a compose file use the same variable name, the last one read wins. `docker/.env` wins over `docker/envs/*.env`, as in Dify.
-- **Some values can't be read.** Values that come from elsewhere (`${VAR}` without a value in your files, Kubernetes `valueFrom`, `$(command)`) are treated as unknown and not judged.
+- **Some values can't be read.** Values that come from elsewhere (`${VAR}` without a value in your files, Kubernetes `valueFrom`, `$(command)`) are treated as unknown and not judged. The agent sandbox check needs `docker/.env` (or the sandbox container's `docker inspect`) to say whether a token is set.
 - **Not a scanner or a certification.** This is general technical information. It doesn't scan networks or test for vulnerabilities.
 
 If a default, a range or an advisory is wrong or out of date, please [open an issue](https://github.com/munimv2/dify-hardening-check/issues).
@@ -110,5 +115,6 @@ MIT licensed. Sources:
 - Dify's [environment variable docs](https://docs.dify.ai/en/self-host/deploy/configuration/environments)
 - the [`docker/.env.example`](https://github.com/langgenius/dify/blob/main/docker/.env.example) and compose files
 - [Dify's security advisories](https://github.com/langgenius/dify/security/advisories)
+- [langgenius/dify#38609](https://github.com/langgenius/dify/issues/38609) on the local sandbox's optional token
 
 Dify is a trademark of LangGenius, Inc. This project isn't affiliated with or endorsed by LangGenius.
