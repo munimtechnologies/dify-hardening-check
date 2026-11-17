@@ -15,6 +15,8 @@ Made with AI agents for MV2 of Munim, Inc. Defaults and advisory data were check
 
 **Found defaults? [ROTATE.md](ROTATE.md) shows how to replace each one without breaking Postgres, Redis or the plugin daemon.**
 
+Running Dify for several clients? [ai-fleet-check](https://github.com/munimtechnologies/ai-fleet-check) runs this check (and the Open WebUI one) over every client's deployment at once and writes a fleet summary, a report per client and tickets for your PSA.
+
 ## Dify 1.19 moved the default passwords
 
 In Dify 1.19.0 (4 November 2026) `docker/.env.example` became a short file of overrides. The published defaults now live in tracked files under `docker/envs/`. For example, `envs/databases/db-postgres.defaults` has `DB_PASSWORD=${DB_PASSWORD:-difyai123456}`. Compose loads these automatically, so **a fresh 1.19 `docker/.env` doesn't mention `DB_PASSWORD` at all, yet Postgres still gets the published password.** It's the same for Redis, the code sandbox key (`envs/core-services/sandbox.defaults`) and the plugin daemon keys (`envs/core-services/plugin-daemon.defaults`).
@@ -169,7 +171,7 @@ After paying, email munimversion2@gmail.com:
 
 The review arrives within 48 hours of receiving everything. MV2 never asks for passwords, keys or remote access, and this tool never prints them.
 
-Also by MV2: [openwebui-hardening-check](https://github.com/munimtechnologies/openwebui-hardening-check), the same kind of check for Open WebUI.
+Also by MV2: [openwebui-hardening-check](https://github.com/munimtechnologies/openwebui-hardening-check), the same kind of check for Open WebUI, and [ai-fleet-check](https://github.com/munimtechnologies/ai-fleet-check), which runs both over many clients' deployments at once.
 
 ## Development
 
