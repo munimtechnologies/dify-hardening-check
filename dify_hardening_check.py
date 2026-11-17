@@ -2,9 +2,10 @@
 """Check a self-hosted Dify deployment for the published default passwords and
 keys it ships with, risky settings, ports open to the network and known
 security advisories. Read-only, standard library only; secret values are never
-printed. Made with AI agents for MV2 of Munim, Inc.
+printed. Made with AI agents for MV2 of Munim, Inc. Apache-2.0.
 
-    python3 dify_hardening_check.py docker/.env docker/docker-compose.yaml docker/envs/*.env
+    python3 dify_hardening_check.py docker/
+    python3 dify_hardening_check.py docker/.env docker/docker-compose.yaml docker/envs/*/*.defaults
     python3 dify_hardening_check.py --url https://dify.example.com
 """
 
@@ -19,17 +20,19 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-__version__ = "0.1.2"
-DATA_DATE = "14 October 2026"
+__version__ = "0.1.3"
+DATA_DATE = "17 November 2026"
 REPO = "https://github.com/munimtechnologies/dify-hardening-check"
 ENV_DOCS = "https://docs.dify.ai/en/self-host/deploy/configuration/environments"
 ENV_EXAMPLE = "https://github.com/langgenius/dify/blob/main/docker/.env.example"
+ENV_LAYOUT = "https://github.com/langgenius/dify/blob/main/docker/README.md"
 ADVISORY_PAGE = "https://github.com/langgenius/dify/security/advisories"
 SHELLCTL_ISSUE = "https://github.com/langgenius/dify/issues/38609"
+RELEASE_1_18_0 = "https://github.com/langgenius/dify/releases/tag/1.18.0"
 PROBE_ORIGIN = "https://cors-check.invalid"
 
 # The CVE for Dify's published PostgreSQL password. It names no fixed version:
-# the example file still ships the password, so only replacing it helps.
+# Dify still ships the password as the fallback default, so only replacing it helps.
 DEFAULT_DB_CVE = "CVE-2025-56157"
 DEFAULT_DB_CVE_URL = "https://nvd.nist.gov/vuln/detail/CVE-2025-56157"
 
@@ -39,15 +42,16 @@ RANK = {s: i for i, s in enumerate(SEVERITIES)}
 # Names of passwords, keys and tokens. Values are compared, never printed.
 SENSITIVE = re.compile(r"PASSWORD|PWD|SECRET|TOKEN|KEY", re.I)
 
-# Placeholders from Dify's example env files (docker/.env.example and docker/envs/*.env.example),
-# plus common tutorial values. Compared in lower case.
+# Placeholders from Dify's example and defaults env files (docker/.env.example,
+# docker/envs/**/*.defaults, docker/envs/*.env.example), plus common tutorial values.
+# Compared in lower case.
 WEAK = {
     "difyai123456", "dify123456", "dify", "dify-sandbox", "admin", "password", "testpassword",
     "difypassword", "elastic", "milvus", "xxx", "your-ak", "your-sk", "your-resend-api-key",
     "changeme", "change-me", "secret", "mysecret", "your-secret-key", "your_secret_key", "123456",
 }
 
-# Fixed keys printed in Dify's example env files, so anyone can read them there.
+# Fixed keys printed in Dify's example and defaults env files, so anyone can read them there.
 PUBLISHED_KEYS = {
     "PLUGIN_DAEMON_KEY": "lYkiYYT6owG+71oLerGzA7GXCgOT++6ovaezWAjpCjf+Sjc3ZtU+qUEi",
     "PLUGIN_DIFY_INNER_API_KEY": "QaHbTe77CtuXmsfyhR7+vRjI/+XbV1AaFy691iy+kGDv2Jvy0/eAh8Y1",
@@ -62,7 +66,7 @@ PUBLISHED_VALUES = set(PUBLISHED_KEYS.values())
 OLD_SECRET_KEY_PREFIX = "sk-9f73s3lj"
 
 # Credentials of Dify's own services, under their .env names and the names the
-# compose file passes them on as (POSTGRES_PASSWORD, REDISCLI_AUTH, API_KEY, ...).
+# compose and defaults files pass them on as (POSTGRES_PASSWORD, REDISCLI_AUTH, API_KEY, ...).
 CORE = {
     "DB_PASSWORD", "POSTGRES_PASSWORD", "MYSQL_ROOT_PASSWORD", "REDIS_PASSWORD", "REDISCLI_AUTH",
     "CELERY_BROKER_URL", "SANDBOX_API_KEY", "CODE_EXECUTION_API_KEY", "API_KEY", "PLUGIN_DAEMON_KEY",
@@ -95,8 +99,8 @@ DEBUG_PORT = "5003"
 LOCAL_SANDBOX_PORT = "5004"
 POSTGRES_PORT = "5432"
 
-# Dify advisories: [first affected or None, fixed in, ids, summary, source].
-# Checked against the linked advisories on 14 October 2026.
+# Dify advisories: [first affected or None, fixed in, ids, summary, source(, severity)].
+# Without a severity an entry counts as high. Checked against the linked advisories on 17 November 2026.
 ADVISORIES = [
     [None, "1.4.2", "GHSA-fw4f-cghv-2v33", "API keys were made with a predictable random number generator.",
      ADVISORY_PAGE + "/GHSA-fw4f-cghv-2v33"],
@@ -123,9 +127,12 @@ ADVISORIES = [
     ["1.14.2", "1.16.0", "CVE-2026-105761",
      "Any workspace member can change or switch off other apps' MCP servers (High).",
      ADVISORY_PAGE + "/GHSA-ccrj-frp2-c945"],
+    [None, "1.18.0", "GHSA-6j8g-rp8v-55vr",
+     "Per-IP rate limits can be bypassed with a made-up X-Forwarded-For or CF-Connecting-IP header (Medium).",
+     ADVISORY_PAGE + "/GHSA-6j8g-rp8v-55vr", "medium"],
 ]
-SAFE_VERSION = "1.16.0"
-LATEST = "1.17.1"
+SAFE_VERSION = "1.18.0"
+LATEST = "1.19.0"
 
 
 def parse_version(text):
@@ -191,7 +198,7 @@ IMAGE = re.compile(r"(langgenius/dify-(?:api|web)(?::[A-Za-z0-9_.\-]+)?(?:@sha25
 
 
 def parse_text(text, name="input"):
-    """Reads a .env file, docker-compose.yaml, `docker inspect` JSON or a Kubernetes manifest."""
+    """Reads a .env or .defaults file, docker-compose.yaml, `docker inspect` JSON or a Kubernetes manifest."""
     dep = Deployment()
     dep.sources.append(name)
     stripped = text.lstrip()
@@ -261,10 +268,17 @@ def _parse_inspect(data, dep):
                                   container_port.split("/")[0]))
 
 
+def _precedence(name):
+    """Dify 1.19 loads docker/envs/**/*.defaults first, then a service's own .env
+    override, then docker/.env, which wins."""
+    if name.endswith(".defaults"):
+        return 0
+    return 2 if name == ".env" else 1
+
+
 def merge(deps):
-    """Files named .env are applied last: Dify's docker/.env wins over docker/envs/*.env."""
     out = Deployment()
-    for d in sorted(deps, key=lambda d: d.sources[0] == ".env"):
+    for d in sorted(deps, key=lambda d: _precedence(d.sources[0])):
         out.env.update(d.env)
         out.refs.update(d.refs)
         out.images += [i for i in d.images if i not in out.images]
@@ -273,8 +287,37 @@ def merge(deps):
     return out
 
 
+# Compose files `docker compose up` reads by itself. docker-compose.middleware.yaml
+# is only for the development stack, so it is read only when named explicitly.
+COMPOSE_NAMES = {"docker-compose.yaml", "docker-compose.yml", "docker-compose.override.yaml",
+                 "docker-compose.override.yml", "compose.yaml", "compose.yml"}
+
+
+def expand_paths(paths, isdir=os.path.isdir, walk=os.walk):
+    """Files to read. A directory such as dify/docker stands for the files Docker
+    Compose reads there: .env, the compose file, and envs/**/*.defaults and
+    envs/**/*.env (templates ending in .example are skipped, as Dify skips them)."""
+    out = []
+    for path in paths:
+        if not isdir(path):
+            out.append(path)
+            continue
+        found = []
+        for root, dirs, names in walk(path):
+            dirs[:] = sorted(d for d in dirs if d not in (".git", "volumes", "node_modules"))
+            rel = os.path.relpath(root, path)
+            for name in sorted(names):
+                top = rel == "."
+                if top and (name == ".env" or name in COMPOSE_NAMES):
+                    found.append(os.path.join(root, name))
+                elif not top and rel.split(os.sep)[0] == "envs" and name.endswith((".defaults", ".env")):
+                    found.append(os.path.join(root, name))
+        out += found
+    return out
+
+
 def effective_env(dep):
-    """The values the containers get: compose references are filled in from the env files."""
+    """The values the containers get: compose and defaults references are filled in from the env files."""
     env = dict(dep.env)
     for name, (var, default, colon) in dep.refs.items():
         value = dep.env[var] if var in dep.env else default
@@ -357,6 +400,11 @@ def _names(names, limit=12):
     return "%s and %d more" % (", ".join(names[:limit]), len(names) - limit)
 
 
+TOKEN_FIX = ("Set DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN in docker/.env to a random value (`openssl rand -hex 32`) "
+             "and run `docker compose up -d`. Set it in docker/.env itself: the agent backend and the sandbox both "
+             "read it from there, and a value only in a service env file is not enough.")
+
+
 def check_env(env, version=None):
     """Findings for Dify's environment settings."""
     out = []
@@ -389,14 +437,14 @@ def check_env(env, version=None):
     used, other = default_credentials(env)
     if used:
         db = [n for n in ("DB_PASSWORD", "POSTGRES_PASSWORD") if n in used]
-        cve = (" %s holds the published database password that %s (CVSS 9.8) is about. Dify's example file still ships it, so updating Dify doesn't change it."
+        cve = (" %s holds the published database password that %s (CVSS 9.8) is about. Dify still ships it as the default (since 1.19 in docker/envs/databases/*.defaults), so updating Dify doesn't change it."
                % (db[0], DEFAULT_DB_CVE)) if db else ""
         out.append(finding(
             "medium", "%d passwords and keys still have Dify's published default values" % len(used) if len(used) > 1
             else "A password or key still has Dify's published default value",
             "Replace each with a random value (`openssl rand -hex 32`; hex stays valid inside CELERY_BROKER_URL) in docker/.env and restart. Postgres keeps the password it was created with, so for an existing database change it there first (ALTER USER ... WITH PASSWORD) and then in DB_PASSWORD. Change PLUGIN_DAEMON_KEY and the sandbox keys on both sides together. Step by step: %s/blob/main/ROTATE.md" % REPO,
-            detail="Settings: %s. Anything that can reach these services inside your network (another container, a plugin, a port published by mistake) can use them; Dify's example file says to replace the agent keys in production.%s" % (_names(used), cve),
-            setting="credentials", source=ENV_EXAMPLE))
+            detail="Settings: %s. Anything that can reach these services inside your network (another container, a plugin, a port published by mistake) can use them; Dify's docs say to replace the bundled credentials before production use.%s" % (_names(used), cve),
+            setting="credentials", source=ENV_LAYOUT))
     if other:
         out.append(finding(
             "info", "Placeholder values remain for services you may not use",
@@ -404,11 +452,18 @@ def check_env(env, version=None):
             detail="Settings: %s." % _names(other), setting="credentials", source=ENV_EXAMPLE))
 
     if local_sandbox_token(env) is False:
-        out.append(finding(
-            "medium", "Dify Agent's local sandbox has no access token (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty, the default)",
-            "Set DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN in docker/.env to a random value (`python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`) and run `docker compose up -d`. The compose file gives the same value to agent_backend and to local_sandbox (as SHELLCTL_AUTH_TOKEN).",
-            detail="The sandbox's control API (shellctl) asks for a bearer token only when one is set. Without it, anything that can reach the sandbox, including code running in an agent's shell job, can call that API directly and bypass Dify's per-session tracking of shell jobs (langgenius/dify#38609).",
-            setting="DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN", source=SHELLCTL_ISSUE))
+        if version is not None and version >= (1, 18, 0):
+            out.append(finding(
+                "medium", "Dify Agent's local sandbox has no access token, so Dify %s refuses to run it (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty)" % ".".join(map(str, version)),
+                TOKEN_FIX,
+                detail="Since 1.18.0, enabled Local agent runtimes reject a blank token (1.18.0 release notes), and docker/.env.example still leaves it empty. Agent apps that use the local sandbox fail until it is set.",
+                setting="DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN", source=RELEASE_1_18_0))
+        else:
+            out.append(finding(
+                "medium", "Dify Agent's local sandbox has no access token (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty, the default)",
+                TOKEN_FIX,
+                detail="Before 1.18.0 the sandbox's control API (shellctl) asks for a bearer token only when one is set. Without it, anything that can reach the sandbox, including code running in an agent's shell job, can call that API directly and bypass Dify's per-session tracking of shell jobs (langgenius/dify#38609). From 1.18.0 on, Dify refuses to run the local sandbox without a token.",
+                setting="DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN", source=SHELLCTL_ISSUE))
     if (env.get("DIFY_AGENT_SHELLCTL_AUTH_TOKEN") or "").strip() and env.get("DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN") == "":
         out.append(finding(
             "info", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN was renamed in Dify 1.17",
@@ -562,15 +617,18 @@ def check_version(version, label=""):
             "info", "Dify version unknown",
             "Include docker-compose.yaml (it pins langgenius/dify-api), or look at the version in the console's About dialog and compare it with %s." % ADVISORY_PAGE,
             source=ADVISORY_PAGE)]
-    hits = []
-    for first, fixed, ids, summary, source in ADVISORIES:
+    hits, severity = [], "medium"
+    for entry in ADVISORIES:
+        first, fixed, ids, summary, source = entry[:5]
         if (first is None or version >= parse_version(first)) and version < parse_version(fixed):
             hits.append("%s (fixed in %s): %s %s" % (ids, fixed, summary, source))
+            if (entry[5] if len(entry) > 5 else "high") == "high":
+                severity = "high"
     if not hits:
         return []
     return [finding(
-        "high", "Dify %s has %d known advisor%s" % (label or ".".join(map(str, version)), len(hits), "y" if len(hits) == 1 else "ies"),
-        "Update to %s or newer (the latest is %s at the time of this data); 1.16.0 also closed a SQL injection and an SSRF bypass. Back up the database and volumes first and follow the upgrade notes." % (SAFE_VERSION, LATEST),
+        severity, "Dify %s has %d known advisor%s" % (label or ".".join(map(str, version)), len(hits), "y" if len(hits) == 1 else "ies"),
+        "Update to %s or newer (the latest is %s at the time of this data). Back up the database and volumes first and follow the upgrade notes; 1.19 needs Docker Compose 2.35.0 or newer and moves the defaults into docker/envs/." % (SAFE_VERSION, LATEST),
         detail="\n".join(hits), source=ADVISORY_PAGE)]
 
 
@@ -687,7 +745,7 @@ def _sorted(findings):
     return sorted(findings, key=lambda f: RANK[f["severity"]])
 
 
-FOOTER = ("Checks follow Dify's environment documentation (%s), its example env files and advisories checked on %s. "
+FOOTER = ("Checks follow Dify's environment documentation (%s), its example and defaults env files and advisories checked on %s. "
           "General technical information, not a security certification. "
           "Made with AI agents for MV2 of Munim, Inc.: %s" % (ENV_DOCS, DATA_DATE, REPO))
 REVIEW = "Want a written review of a shared Dify server? See %s#written-review" % REPO
@@ -736,13 +794,14 @@ def _read(path):
         return f.read()
 
 
-def run(files=(), url=None, read=_read, fetch=_fetch):
+def run(files=(), url=None, read=_read, fetch=_fetch, expand=expand_paths):
     """Returns (findings, sources, version label)."""
     findings, sources = [], []
     version, tag, label = None, None, None
     if url:
         findings += check_url(url, fetch)
         sources.append(url)
+    files = expand(list(files)) if files else []
     if files:
         dep = merge([parse_text(read(p), os.path.basename(p)) for p in files])
         env = effective_env(dep)
@@ -760,8 +819,9 @@ def main(argv=None):
         prog="dify_hardening_check.py",
         description="Check a self-hosted Dify deployment for published default credentials, risky settings, "
                     "open ports and known advisories. Read-only; secret values are never printed.")
-    p.add_argument("files", nargs="*", help="docker/.env, docker/docker-compose.yaml, docker/envs/*.env, "
-                                            "`docker inspect` JSON or a Kubernetes manifest")
+    p.add_argument("files", nargs="*", help="Dify's docker/ folder, or files: docker/.env, docker-compose.yaml, "
+                                            "docker/envs/**/*.defaults and *.env, `docker inspect` JSON or a "
+                                            "Kubernetes manifest")
     p.add_argument("--url", help="the address of a Dify server you run, e.g. https://dify.example.com")
     p.add_argument("--json", action="store_true", help="print JSON")
     p.add_argument("--markdown", action="store_true", help="print Markdown")

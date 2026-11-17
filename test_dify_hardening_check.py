@@ -124,6 +124,22 @@ K8S = """        env:
             value: difyai123456
 """
 
+# Dify 1.19.0's docker/ layout (shortened): a minimal .env, and the defaults in docker/envs/**/*.defaults.
+LAYOUT_119 = {
+    ".env": "COMPOSE_PROFILES=weaviate,postgresql,collaboration\nDIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN=\n",
+    "docker-compose.yaml": "services:\n  api:\n    image: langgenius/dify-api:1.19.0\n",
+    "docker-compose.middleware.yaml": MIDDLEWARE,
+    os.path.join("envs", "security.env.example"): "SECRET_KEY=\nCODE_EXECUTION_API_KEY=dify-sandbox\n",
+    os.path.join("envs", "databases", "db-postgres.defaults"):
+        "PGDATA=${PGDATA:-/var/lib/postgresql/data/pgdata}\nDB_USERNAME=${DB_USERNAME:-postgres}\n"
+        "DB_PASSWORD=${DB_PASSWORD:-difyai123456}\nPOSTGRES_PASSWORD=${DB_PASSWORD:-difyai123456}\n",
+    os.path.join("envs", "core-services", "plugin-daemon.defaults"):
+        "SERVER_KEY=${PLUGIN_DAEMON_KEY:-%s}\nPLUGIN_AWS_SECRET_KEY=${PLUGIN_AWS_SECRET_KEY:-}\n"
+        % dhc.PUBLISHED_KEYS["PLUGIN_DAEMON_KEY"],
+    os.path.join("envs", "core-services", "sandbox.defaults"):
+        "SANDBOX_API_KEY=${SANDBOX_API_KEY:-dify-sandbox}\nAPI_KEY=${SANDBOX_API_KEY:-dify-sandbox}\n",
+}
+
 
 class ParseTests(unittest.TestCase):
     def test_env_file(self):
@@ -152,6 +168,11 @@ class ParseTests(unittest.TestCase):
                          dhc.parse_text("DB_PASSWORD=difyai123456\n", "security.env")])
         self.assertEqual(dhc.effective_env(dep)["DB_PASSWORD"], "from-dotenv")
 
+    def test_service_override_wins_over_defaults(self):
+        dep = dhc.merge([dhc.parse_text("REDIS_PASSWORD=from-override\n", "redis.env"),
+                         dhc.parse_text("REDIS_PASSWORD=difyai123456\n", "redis.defaults")])
+        self.assertEqual(dhc.effective_env(dep)["REDIS_PASSWORD"], "from-override")
+
     def test_empty_value_falls_back_to_compose_default(self):
         # Before 1.14.1 the compose file had SECRET_KEY: ${SECRET_KEY:-<example key>}.
         compose = "    environment:\n      SECRET_KEY: ${SECRET_KEY:-%sXYZ}\n" % dhc.OLD_SECRET_KEY_PREFIX
@@ -179,6 +200,66 @@ class ParseTests(unittest.TestCase):
         self.assertNotIn("SECRET_KEY", settings(found))
         self.assertNotIn("CONSOLE_CORS_ALLOW_ORIGINS", settings(found))
         self.assertIn("credentials", settings(found))
+
+
+class Layout119Tests(unittest.TestCase):
+    """Dify 1.19 moved the published defaults out of docker/.env into docker/envs/**/*.defaults."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = self.tmp.name
+        for name, text in LAYOUT_119.items():
+            path = os.path.join(self.d, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, text):
+        with open(os.path.join(self.d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_folder_expands_to_the_files_compose_reads(self):
+        names = [os.path.relpath(p, self.d) for p in dhc.expand_paths([self.d])]
+        self.assertEqual(names[:2], [".env", "docker-compose.yaml"])
+        self.assertEqual(sorted(names[2:]), sorted([
+            os.path.join("envs", "core-services", "plugin-daemon.defaults"),
+            os.path.join("envs", "core-services", "sandbox.defaults"),
+            os.path.join("envs", "databases", "db-postgres.defaults")]))
+        self.assertEqual(dhc.expand_paths(["x.env"]), ["x.env"])
+
+    def test_defaults_files_hold_the_published_passwords(self):
+        findings, sources, label = dhc.run([self.d])
+        self.assertIn("db-postgres.defaults", sources)
+        self.assertNotIn("security.env.example", sources)
+        self.assertNotIn("docker-compose.middleware.yaml", sources)
+        self.assertEqual(label, "1.19.0 (from the image tag)")
+        self.assertEqual(by_severity(findings, "critical") + by_severity(findings, "high"), [])
+        creds = [f for f in findings if f["setting"] == "credentials"][0]
+        self.assertEqual(creds["severity"], "medium")
+        for name in ("DB_PASSWORD", "POSTGRES_PASSWORD", "SERVER_KEY", "API_KEY", "SANDBOX_API_KEY"):
+            self.assertIn(name, creds["detail"])
+        self.assertIn(dhc.DEFAULT_DB_CVE, creds["detail"])
+        token = [f for f in findings if f["setting"] == "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN"]
+        self.assertIn("refuses to run it", token[0]["title"])
+        self.assertEqual(token[0]["source"], dhc.RELEASE_1_18_0)
+        self.assertFalse(any("known advisor" in t for t in titles(findings)))
+        text = json.dumps(findings)
+        for value in ["difyai123456", "dify-sandbox"] + list(dhc.PUBLISHED_VALUES):
+            self.assertNotIn(value, text)
+
+    def test_dot_env_values_replace_the_defaults(self):
+        self.write(".env", "DB_PASSWORD=q8Vh2mZ0rT4w\nPLUGIN_DAEMON_KEY=Zx81kQ0pLm\nSANDBOX_API_KEY=Pq7rS2tUv\n"
+                           "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN=f0e1d2c3b4a5\n")
+        findings, _, _ = dhc.run([self.d])
+        self.assertEqual([f for f in findings if f["setting"] in ("credentials", "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN")], [])
+
+    def test_middleware_file_is_read_when_named(self):
+        findings, _, _ = dhc.run([self.d, os.path.join(self.d, "docker-compose.middleware.yaml")])
+        crit = titles(by_severity(findings, "critical"))
+        self.assertTrue(any(t.startswith("PostgreSQL") for t in crit))
 
 
 class EnvCheckTests(unittest.TestCase):
@@ -262,6 +343,13 @@ class LocalSandboxTests(unittest.TestCase):
         self.assertEqual([f["severity"] for f in found], ["medium"])
         self.assertIn("38609", found[0]["source"])
 
+    def test_118_refuses_a_blank_token(self):
+        env = dhc.effective_env(dhc.parse_text(AGENT_ENV, ".env"))
+        found = [f for f in dhc.check_env(env, (1, 18, 0)) if f["setting"] == "DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN"]
+        self.assertEqual([f["severity"] for f in found], ["medium"])
+        self.assertIn("Dify 1.18.0 refuses to run it", found[0]["title"])
+        self.assertIn("docker/.env", found[0]["fix"])
+
     def test_compose_nested_reference_is_unknown_until_env_says(self):
         compose = dhc.parse_text("services:\n" + LOCAL_SANDBOX, "docker-compose.yaml")
         self.assertIsNone(compose.env["SHELLCTL_AUTH_TOKEN"])
@@ -319,17 +407,27 @@ class DeploymentTests(unittest.TestCase):
 
 class VersionTests(unittest.TestCase):
     def test_versions(self):
-        self.assertEqual(dhc.check_version((1, 14, 2), "1.14.2")[0]["title"], "Dify 1.14.2 has 1 known advisory")
-        self.assertEqual(dhc.check_version((1, 13, 0))[0]["title"], "Dify 1.13.0 has 3 known advisories")
+        found = dhc.check_version((1, 14, 2), "1.14.2")
+        self.assertEqual(found[0]["title"], "Dify 1.14.2 has 2 known advisories")
+        self.assertEqual(found[0]["severity"], "high")
+        self.assertEqual(dhc.check_version((1, 13, 0))[0]["title"], "Dify 1.13.0 has 4 known advisories")
         found = dhc.check_version((1, 10, 1), "1.10.1-fix.1")
-        self.assertEqual(found[0]["title"], "Dify 1.10.1-fix.1 has 7 known advisories")
+        self.assertEqual(found[0]["title"], "Dify 1.10.1-fix.1 has 8 known advisories")
         self.assertIn("CVE-2026-21866", found[0]["detail"])
         self.assertNotIn("GHSA-fw4f-cghv-2v33", found[0]["detail"])
-        self.assertEqual(dhc.check_version((1, 16, 0)), [])
-        self.assertEqual(dhc.check_version((1, 17, 1)), [])
         self.assertEqual(dhc.check_version(None)[0]["severity"], "info")
         self.assertEqual(dhc.parse_version("1.10.1-fix.1"), (1, 10, 1))
         self.assertIsNone(dhc.parse_version("latest"))
+
+    def test_medium_only(self):
+        for version in ((1, 16, 0), (1, 17, 1)):
+            found = dhc.check_version(version)
+            self.assertEqual(found[0]["title"], "Dify %s has 1 known advisory" % ".".join(map(str, version)))
+            self.assertEqual(found[0]["severity"], "medium")
+            self.assertIn("GHSA-6j8g-rp8v-55vr", found[0]["detail"])
+            self.assertIn("1.18.0", found[0]["fix"])
+        self.assertEqual(dhc.check_version((1, 18, 0)), [])
+        self.assertEqual(dhc.check_version((1, 19, 0)), [])
 
 
 def fake_fetch(setup, init=None, headers=None, page_headers=None, status=200):
@@ -410,10 +508,10 @@ class CliTests(unittest.TestCase):
                 dhc.main([])
 
     def test_run_with_injected_reader(self):
-        findings, sources, label = dhc.run(["docker-compose.yaml"], read=lambda p: COMPOSE)
+        findings, sources, label = dhc.run(["docker-compose.yaml"], read=lambda p: COMPOSE, expand=list)
         self.assertEqual(sources, ["docker-compose.yaml"])
         self.assertEqual(label, "1.14.2 (from the image tag)")
-        self.assertEqual(titles(by_severity(findings, "high")), ["Dify 1.14.2 has 1 known advisory"])
+        self.assertEqual(titles(by_severity(findings, "high")), ["Dify 1.14.2 has 2 known advisories"])
 
 
 if __name__ == "__main__":
