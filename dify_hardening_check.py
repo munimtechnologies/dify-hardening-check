@@ -20,21 +20,28 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-__version__ = "0.1.3"
-DATA_DATE = "17 November 2026"
+__version__ = "0.1.4"
+DATA_DATE = "18 November 2026"
 REPO = "https://github.com/munimtechnologies/dify-hardening-check"
 ENV_DOCS = "https://docs.dify.ai/en/self-host/deploy/configuration/environments"
 ENV_EXAMPLE = "https://github.com/langgenius/dify/blob/main/docker/.env.example"
 ENV_LAYOUT = "https://github.com/langgenius/dify/blob/main/docker/README.md"
+ENV_LAYOUT_120 = "https://github.com/langgenius/dify/blob/1.20.0/docker/README.md"
 ADVISORY_PAGE = "https://github.com/langgenius/dify/security/advisories"
 SHELLCTL_ISSUE = "https://github.com/langgenius/dify/issues/38609"
 RELEASE_1_18_0 = "https://github.com/langgenius/dify/releases/tag/1.18.0"
+RELEASE_1_20_0 = "https://github.com/langgenius/dify/releases/tag/1.20.0"
 PROBE_ORIGIN = "https://cors-check.invalid"
 
 # The CVE for Dify's published PostgreSQL password. It names no fixed version:
 # Dify still ships the password as the fallback default, so only replacing it helps.
 DEFAULT_DB_CVE = "CVE-2025-56157"
 DEFAULT_DB_CVE_URL = "https://nvd.nist.gov/vuln/detail/CVE-2025-56157"
+
+# docker/envs/core-services/shared.env: a legacy override file that Dify 1.19 still
+# loaded (below api-worker.env) and that no service loads from 1.20.0 on.
+RETIRED_ENV = "shared.env"
+RETIRED_FROM = (1, 20, 0)
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
 RANK = {s: i for i, s in enumerate(SEVERITIES)}
@@ -74,6 +81,15 @@ CORE = {
     "DIFY_AGENT_API_TOKEN", "DIFY_AGENT_SERVER_SECRET_KEY",
 }
 
+# Settings this tool judges besides passwords and keys. A setting of either kind that
+# silently stops applying makes a finding about the retired shared.env more urgent.
+WATCHED = {
+    "SECRET_KEY", "INIT_PASSWORD", "CONSOLE_CORS_ALLOW_ORIGINS", "WEB_API_CORS_ALLOW_ORIGINS",
+    "FORCE_VERIFYING_SIGNATURE", "SSRF_PROXY_HTTP_URL", "SSRF_PROXY_HTTPS_URL", "ALLOW_UNSAFE_DATA_SCHEME",
+    "ALLOW_EMBED", "DEBUG", "FLASK_DEBUG", "DEPLOY_ENV", "ENABLE_REQUEST_LOGGING", "OPENAPI_ENABLED",
+    "CONSOLE_WEB_URL", "APP_WEB_URL", "CONSOLE_API_URL", "SERVICE_API_URL", "FILES_URL",
+}
+
 # VECTOR_STORE value -> prefix of its settings, where the prefix isn't just the name in capitals.
 VECTOR_PREFIX = {"pgvecto-rs": "PGVECTO_RS_", "seekdb": "OCEANBASE_", "elasticsearch-ja": "ELASTICSEARCH_"}
 
@@ -100,7 +116,7 @@ LOCAL_SANDBOX_PORT = "5004"
 POSTGRES_PORT = "5432"
 
 # Dify advisories: [first affected or None, fixed in, ids, summary, source(, severity)].
-# Without a severity an entry counts as high. Checked against the linked advisories on 17 November 2026.
+# Without a severity an entry counts as high. Checked against the linked advisories on 18 November 2026.
 ADVISORIES = [
     [None, "1.4.2", "GHSA-fw4f-cghv-2v33", "API keys were made with a predictable random number generator.",
      ADVISORY_PAGE + "/GHSA-fw4f-cghv-2v33"],
@@ -132,7 +148,7 @@ ADVISORIES = [
      ADVISORY_PAGE + "/GHSA-6j8g-rp8v-55vr", "medium"],
 ]
 SAFE_VERSION = "1.18.0"
-LATEST = "1.19.0"
+LATEST = "1.20.0"
 
 
 def parse_version(text):
@@ -269,11 +285,14 @@ def _parse_inspect(data, dep):
 
 
 def _precedence(name):
-    """Dify 1.19 loads docker/envs/**/*.defaults first, then a service's own .env
-    override, then docker/.env, which wins."""
+    """Dify loads docker/envs/**/*.defaults first, then a service's own .env override,
+    then docker/.env, which wins. Dify 1.19 still read the legacy shared.env, below
+    every other service override (api-worker.env wins over it)."""
     if name.endswith(".defaults"):
         return 0
-    return 2 if name == ".env" else 1
+    if name == RETIRED_ENV:
+        return 1
+    return 3 if name == ".env" else 2
 
 
 def merge(deps):
@@ -400,9 +419,61 @@ def _names(names, limit=12):
     return "%s and %d more" % (", ".join(names[:limit]), len(names) - limit)
 
 
+def _vlabel(version):
+    return ".".join(map(str, version))
+
+
 TOKEN_FIX = ("Set DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN in docker/.env to a random value (`openssl rand -hex 32`) "
              "and run `docker compose up -d`. Set it in docker/.env itself: the agent backend and the sandbox both "
              "read it from there, and a value only in a service env file is not enough.")
+
+RETIRED_FIX = ("Follow Dify's 1.20 upgrade note: back up docker/envs/, then rename envs/core-services/shared.env to "
+               "api-worker.env if that file doesn't exist yet. If it does, copy only the settings api-worker.env lacks "
+               "into it and keep api-worker.env's own values. Public URL settings belong in envs/core-services/urls.env. "
+               "Then run `docker compose up -d` (a plain restart doesn't reload env files) and archive the old file.")
+
+
+def check_retired(retired, others, version):
+    """Findings about docker/envs/core-services/shared.env. `retired` holds the parsed
+    shared.env file(s), `others` every other file read; only setting names are reported."""
+    names = sorted({n for d in retired for n in list(d.env) + list(d.refs)})
+    if not names:
+        return []
+    count = "%d setting%s" % (len(names), "" if len(names) == 1 else "s")
+    if version is None:
+        return [finding(
+            "info", "envs/core-services/shared.env was read as Dify 1.19 reads it; Dify 1.20 and newer ignore it",
+            "If you run Dify 1.20 or newer, add docker-compose.yaml to the check so it knows the version, and move "
+            "the file's settings. " + RETIRED_FIX,
+            detail="It holds %s: %s." % (count, _names(names)), setting=RETIRED_ENV, source=ENV_LAYOUT_120)]
+    if version < RETIRED_FROM:
+        return [finding(
+            "info", "envs/core-services/shared.env stops working in Dify 1.20",
+            "Before you update to 1.20 or newer: " + RETIRED_FIX,
+            detail="Dify %s still loads it (below api-worker.env), but from 1.20.0 on no service does. It holds %s: %s."
+                   % (_vlabel(version), count, _names(names)),
+            setting=RETIRED_ENV, source=ENV_LAYOUT_120)]
+    elsewhere = set()
+    for d in others:
+        if not d.sources[0].endswith(".defaults"):
+            elsewhere |= set(d.env) | set(d.refs)
+    lost = [n for n in names if n not in elsewhere]
+    if not lost:
+        return [finding(
+            "info", "Dify %s doesn't load envs/core-services/shared.env, but every setting in it is also set in another file"
+                    % _vlabel(version),
+            "Nothing is lost. Archive or delete the file, as Dify's upgrade notes say, so nobody edits it by mistake.",
+            setting=RETIRED_ENV, source=ENV_LAYOUT_120)]
+    important = [n for n in lost if SENSITIVE.search(n) or n in WATCHED]
+    return [finding(
+        "medium" if important else "low",
+        "Dify %s ignores envs/core-services/shared.env: %d setting%s in it no longer appl%s"
+        % (_vlabel(version), len(lost), "" if len(lost) == 1 else "s", "ies" if len(lost) == 1 else "y"),
+        RETIRED_FIX,
+        detail="Settings: %s. Since 1.20.0 no service loads shared.env, so these fall back to docker/.env or to Dify's "
+               "tracked defaults, which for passwords and keys are often the published ones. The other findings in "
+               "this report use the values Dify gets now." % _names(lost),
+        setting=RETIRED_ENV, source=ENV_LAYOUT_120)]
 
 
 def check_env(env, version=None):
@@ -454,7 +525,7 @@ def check_env(env, version=None):
     if local_sandbox_token(env) is False:
         if version is not None and version >= (1, 18, 0):
             out.append(finding(
-                "medium", "Dify Agent's local sandbox has no access token, so Dify %s refuses to run it (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty)" % ".".join(map(str, version)),
+                "medium", "Dify Agent's local sandbox has no access token, so Dify %s refuses to run it (DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN is empty)" % _vlabel(version),
                 TOKEN_FIX,
                 detail="Since 1.18.0, enabled Local agent runtimes reject a blank token (1.18.0 release notes), and docker/.env.example still leaves it empty. Agent apps that use the local sandbox fail until it is set.",
                 setting="DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN", source=RELEASE_1_18_0))
@@ -469,6 +540,12 @@ def check_env(env, version=None):
             "info", "DIFY_AGENT_SHELLCTL_AUTH_TOKEN was renamed in Dify 1.17",
             "Move the value to DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN. The compose file still falls back to the old name, but setup scripts and Helm values that only fill the new name leave the sandbox without a token.",
             setting="DIFY_AGENT_SHELLCTL_AUTH_TOKEN", source=ENV_EXAMPLE))
+
+    if version is not None and version >= (1, 20, 0) and _flag(env, "OPENAPI_ENABLED", True):
+        out.append(finding(
+            "info", "Dify's OpenAPI (/openapi/v1) is on (OPENAPI_ENABLED, true by default since 1.20.0)",
+            "Fine if you use personal access tokens or difyctl. Otherwise set OPENAPI_ENABLED=false in docker/.env and run `docker compose up -d`. Personal access tokens depend on SECRET_KEY, so every API replica needs the same SECRET_KEY.",
+            setting="OPENAPI_ENABLED", source=RELEASE_1_20_0))
 
     if env.get("INIT_PASSWORD") == "":
         out.append(finding(
@@ -627,8 +704,8 @@ def check_version(version, label=""):
     if not hits:
         return []
     return [finding(
-        severity, "Dify %s has %d known advisor%s" % (label or ".".join(map(str, version)), len(hits), "y" if len(hits) == 1 else "ies"),
-        "Update to %s or newer (the latest is %s at the time of this data). Back up the database and volumes first and follow the upgrade notes; 1.19 needs Docker Compose 2.35.0 or newer and moves the defaults into docker/envs/." % (SAFE_VERSION, LATEST),
+        severity, "Dify %s has %d known advisor%s" % (label or _vlabel(version), len(hits), "y" if len(hits) == 1 else "ies"),
+        "Update to %s or newer (the latest is %s at the time of this data). Back up the database and volumes first and follow the upgrade notes: 1.19 needs Docker Compose 2.35.0 or newer and moves the defaults into docker/envs/, and 1.20 stops loading envs/core-services/shared.env." % (SAFE_VERSION, LATEST),
         detail="\n".join(hits), source=ADVISORY_PAGE)]
 
 
@@ -803,10 +880,20 @@ def run(files=(), url=None, read=_read, fetch=_fetch, expand=expand_paths):
         sources.append(url)
     files = expand(list(files)) if files else []
     if files:
-        dep = merge([parse_text(read(p), os.path.basename(p)) for p in files])
+        deps = [parse_text(read(p), os.path.basename(p)) for p in files]
+        version, tag = image_version(merge(deps))
+        retired = [d for d in deps if d.sources[0] == RETIRED_ENV]
+        ignored = bool(retired) and version is not None and version >= RETIRED_FROM
+        others = [d for d in deps if d.sources[0] != RETIRED_ENV]
+        if ignored:
+            deps = others
+        if retired:
+            findings += check_retired(retired, others, version)
+        dep = merge(deps)
         env = effective_env(dep)
         sources += dep.sources
-        version, tag = image_version(dep)
+        if ignored:
+            sources.append("%s (not loaded by Dify %s)" % (RETIRED_ENV, _vlabel(version)))
         if version:
             label = "%s (from the image tag)" % tag
         findings += check_env(env, version) + check_deployment(dep, env)

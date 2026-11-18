@@ -11,15 +11,28 @@ Check a self-hosted [Dify](https://github.com/langgenius/dify) deployment, in on
 - Comes with an [agent skill](skills/dify-hardening-check/SKILL.md), so coding agents such as Claude Code, Codex or Cursor can run the check and explain the results.
 - One Python file, standard library only, read-only. **Secret values are never printed.** It reports only the *names* of settings that still hold a published default, such as `DB_PASSWORD`.
 
-Made with AI agents for MV2 of Munim, Inc. Defaults and advisory data were checked on 17 November 2026 against Dify 1.19.0.
+Made with AI agents for MV2 of Munim, Inc. Defaults and advisory data were checked on 18 November 2026 against Dify 1.20.0.
 
 **Found defaults? [ROTATE.md](ROTATE.md) shows how to replace each one without breaking Postgres, Redis or the plugin daemon.**
 
 Running Dify for several clients? [ai-fleet-check](https://github.com/munimtechnologies/ai-fleet-check) runs this check (and the Open WebUI one) over every client's deployment at once and writes a fleet summary, a report per client and tickets for your PSA.
 
+## Dify 1.20 stopped loading `shared.env`
+
+[Dify 1.20.0](https://github.com/langgenius/dify/releases/tag/1.20.0) (18 November 2026) no longer loads `docker/envs/core-services/shared.env`. Dify 1.19 still read this legacy override file for the API and workers, so older setups often keep settings there. After the update, **every setting that is only in `shared.env` silently goes back to Dify's default**. For keys such as `PLUGIN_DAEMON_KEY` that can be the published value, and `CONSOLE_CORS_ALLOW_ORIGINS` goes back to `*`.
+
+From 0.1.4 on, the tool reads `shared.env` the way your Dify version does:
+- **1.20 or newer** (from the image tag in `docker-compose.yaml`): the file is left out, and the other findings use the values Dify really gets. A separate finding names the settings that no longer apply. It is medium when a password, key or a setting the tool checks is among them.
+- **1.19 or older:** the file is read, below `api-worker.env` as in Dify, with a note that it stops working in 1.20.
+- **Version unknown:** the file is read, with a note to add `docker-compose.yaml` so the tool knows the version.
+
+The fix is in [Dify's docker/README.md](https://github.com/langgenius/dify/blob/1.20.0/docker/README.md). Back up `docker/envs/` first. Then rename `shared.env` to `api-worker.env` if that file doesn't exist yet, or copy only the missing settings into it. Then run `docker compose up -d`, because a plain restart doesn't reload env files.
+
+1.20.0 also turns on Dify's OpenAPI (`/openapi/v1`, for personal access tokens and `difyctl`) by default. The tool notes it as info. Set `OPENAPI_ENABLED=false` if you don't use it.
+
 ## Dify 1.19 moved the default passwords
 
-In Dify 1.19.0 (4 November 2026) `docker/.env.example` became a short file of overrides. The published defaults now live in tracked files under `docker/envs/`. For example, `envs/databases/db-postgres.defaults` has `DB_PASSWORD=${DB_PASSWORD:-difyai123456}`. Compose loads these automatically, so **a fresh 1.19 `docker/.env` doesn't mention `DB_PASSWORD` at all, yet Postgres still gets the published password.** It's the same for Redis, the code sandbox key (`envs/core-services/sandbox.defaults`) and the plugin daemon keys (`envs/core-services/plugin-daemon.defaults`).
+In Dify 1.19.0 (4 November 2026) `docker/.env.example` became a short file of overrides. The published defaults now live in tracked files under `docker/envs/`. For example, `envs/databases/db-postgres.defaults` has `DB_PASSWORD=${DB_PASSWORD:-difyai123456}`. Compose loads these automatically, so **a fresh 1.19 or 1.20 `docker/.env` doesn't mention `DB_PASSWORD` at all, yet Postgres still gets the published password.** It's the same for Redis, the code sandbox key (`envs/core-services/sandbox.defaults`) and the plugin daemon keys (`envs/core-services/plugin-daemon.defaults`).
 
 A check that reads only `docker/.env` misses all of this, and so did this tool before 0.1.3. From 0.1.3 on, give it the folder:
 
@@ -42,7 +55,7 @@ Most guides say "change the defaults". This tool tells you which ones you haven'
 ```sh
 curl -O https://raw.githubusercontent.com/munimtechnologies/dify-hardening-check/main/dify_hardening_check.py
 
-python3 dify_hardening_check.py /path/to/dify/docker                       # Dify 1.19 and older
+python3 dify_hardening_check.py /path/to/dify/docker                       # the whole docker/ folder
 python3 dify_hardening_check.py --url https://dify.example.com             # a server you run
 docker inspect $(docker ps -q) > inspect.json && python3 dify_hardening_check.py inspect.json
 ```
@@ -58,7 +71,7 @@ Options:
 Example output for a 1.19.0 `docker/` folder whose `.env` was copied unchanged from `.env.example` (shortened; the full list of settings depends on your files):
 
 ```
-Dify hardening check 0.1.3
+Dify hardening check 0.1.4
 Checked: .env, docker-compose.yaml, ..., plugin-daemon.defaults, sandbox.defaults, db-postgres.defaults, ...
 Dify version: 1.19.0 (from the image tag)
 
@@ -74,7 +87,7 @@ MEDIUM    The console API accepts requests from every origin (CONSOLE_CORS_ALLOW
 
 [CVE-2025-56157](https://nvd.nist.gov/vuln/detail/CVE-2025-56157) (CVSS 9.8, published 18 December 2025) is about the PostgreSQL username and password Dify publishes: anyone who can reach port 5432 can sign in to the database with the published password. The record lists Dify "through 1.5.1". Dify notes that its Docker setup doesn't publish 5432 by default since 1.0.1.
 
-Scanners often show this CVE with **no fixed version**, because updating doesn't help: Dify 1.19.0 still ships the same password as the fallback in `docker/envs/databases/db-postgres.defaults`, and Postgres keeps the password it was created with. What matters is your setup:
+Scanners often show this CVE with **no fixed version**, because updating doesn't help: Dify 1.20.0 still ships the same password as the fallback in `docker/envs/databases/db-postgres.defaults`, and Postgres keeps the password it was created with. What matters is your setup:
 
 | Your setup | Risk | What the tool reports |
 |---|---|---|
@@ -104,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: munimtechnologies/dify-hardening-check@v0.1.3
+      - uses: munimtechnologies/dify-hardening-check@v0.1.4
         with:
           files: docker/.env docker/docker-compose.yaml docker/envs/*/*.defaults docker/envs/*/*.env
           fail-on: high                                                      # critical, high, medium, low or never
@@ -116,7 +129,7 @@ jobs:
 - Files that don't exist are skipped with a warning. List files or wildcards; the Action doesn't take a folder.
 - `url` also works. Only use it for a server you run, and keep in mind that the job summary shows the address.
 
-It needs Python 3, which GitHub's Linux and macOS runners have. Pin a release tag (`@v0.1.3`) and update on purpose.
+It needs Python 3, which GitHub's Linux and macOS runners have. Pin a release tag (`@v0.1.4`) and update on purpose.
 
 ## For coding agents
 
@@ -133,13 +146,14 @@ From your files:
 | Area | Checks |
 |---|---|
 | Secret key | `SECRET_KEY` is the public key from the old example file, a placeholder, or shorter than 32 characters. It also flags an empty key on versions before 1.14.1, whose compose file filled it with the public key. |
-| Published defaults | `DB_PASSWORD` (CVE-2025-56157), `REDIS_PASSWORD` (also inside `CELERY_BROKER_URL`), `SANDBOX_API_KEY` / `CODE_EXECUTION_API_KEY`, `PLUGIN_DAEMON_KEY`, `PLUGIN_DIFY_INNER_API_KEY`, `DIFY_AGENT_API_TOKEN`, `DIFY_AGENT_SERVER_SECRET_KEY`, plus the credentials of the vector store selected in `VECTOR_STORE`. This covers values in `.env`, in the 1.19 `envs/**/*.defaults` files and under the names they're passed on as (`POSTGRES_PASSWORD`, `SERVER_KEY`, `API_KEY`, ...). Placeholders for services you don't use are listed separately as info. |
+| Published defaults | `DB_PASSWORD` (CVE-2025-56157), `REDIS_PASSWORD` (also inside `CELERY_BROKER_URL`), `SANDBOX_API_KEY` / `CODE_EXECUTION_API_KEY`, `PLUGIN_DAEMON_KEY`, `PLUGIN_DIFY_INNER_API_KEY`, `DIFY_AGENT_API_TOKEN`, `DIFY_AGENT_SERVER_SECRET_KEY`, plus the credentials of the vector store selected in `VECTOR_STORE`. This covers values in `.env`, in the `envs/**/*.defaults` files (1.19 and newer) and under the names they're passed on as (`POSTGRES_PASSWORD`, `SERVER_KEY`, `API_KEY`, ...). Placeholders for services you don't use are listed separately as info. |
+| Retired env file | Settings in `envs/core-services/shared.env` that Dify 1.20 and newer no longer load (medium when a password, key or checked setting is among them). |
 | Agent sandbox | An empty `DIFY_AGENT_LOCAL_SANDBOX_AUTH_TOKEN` while the local sandbox backend is used. Before 1.18.0 the sandbox's control API only asks for a token when one is set ([langgenius/dify#38609](https://github.com/langgenius/dify/issues/38609)). From [1.18.0](https://github.com/langgenius/dify/releases/tag/1.18.0) on, Dify refuses to run it without one. It also notes a value left under the pre-1.17 name `DIFY_AGENT_SHELLCTL_AUTH_TOKEN`. |
 | Ports | Postgres, MySQL, Redis, the sandbox proxy, the plugin daemon, the agent's local sandbox and vector databases published on every interface. It's critical when the service's credential is still the default, or for the local sandbox when it has no token. The plugin remote-debugging port 5003, which the stock compose file publishes, is flagged as low. |
 | Setup | Empty `INIT_PASSWORD`: until setup is finished, anyone who opens `/install` can create the owner account. |
-| Network and web | `CONSOLE_CORS_ALLOW_ORIGINS=*` and `WEB_API_CORS_ALLOW_ORIGINS=*`; plain `http://` addresses in `CONSOLE_WEB_URL`, `APP_WEB_URL` and the like; `NGINX_HTTPS_ENABLED=false`; an empty `SSRF_PROXY_HTTP_URL`; `ALLOW_UNSAFE_DATA_SCHEME`; `ALLOW_EMBED` |
+| Network and web | `CONSOLE_CORS_ALLOW_ORIGINS=*` and `WEB_API_CORS_ALLOW_ORIGINS=*`; plain `http://` addresses in `CONSOLE_WEB_URL`, `APP_WEB_URL` and the like; `NGINX_HTTPS_ENABLED=false`; an empty `SSRF_PROXY_HTTP_URL`; `ALLOW_UNSAFE_DATA_SCHEME`; `ALLOW_EMBED`; on 1.20 and newer, `OPENAPI_ENABLED` left on (info) |
 | Plugins and debugging | `FORCE_VERIFYING_SIGNATURE=false`; `DEBUG`, `FLASK_DEBUG`, `DEPLOY_ENV=DEVELOPMENT`, `ENABLE_REQUEST_LOGGING` |
-| Version | Every advisory in [`ADVISORIES`](dify_hardening_check.py) is matched against the `langgenius/dify-api` / `dify-web` image tag. Upgrading to 1.18.0 or newer fixes all of them (the latest, 1.19.0, is safest). The newest is [GHSA-6j8g-rp8v-55vr](https://github.com/langgenius/dify/security/advisories/GHSA-6j8g-rp8v-55vr), published 14 November 2026: through 1.17.1, per-IP rate limits can be bypassed with a made-up `X-Forwarded-For` header. Tags such as `:latest` that move are flagged. |
+| Version | Every advisory in [`ADVISORIES`](dify_hardening_check.py) is matched against the `langgenius/dify-api` / `dify-web` image tag. Upgrading to 1.18.0 or newer fixes all of them (the latest, 1.20.0, is safest). The newest is [GHSA-6j8g-rp8v-55vr](https://github.com/langgenius/dify/security/advisories/GHSA-6j8g-rp8v-55vr), published 14 November 2026: through 1.17.1, per-IP rate limits can be bypassed with a made-up `X-Forwarded-For` header. Tags such as `:latest` that move are flagged. |
 
 With `--url`, it reads only what any visitor's browser loads before signing in:
 - `/console/api/setup` and `/console/api/init`, which the console uses to decide whether to show `/install`. If setup isn't finished and no init password is set, **the next visitor creates the owner account**.
@@ -151,7 +165,7 @@ It never signs in, sends a password or changes anything. Only run it against ser
 
 ## Limits
 
-- **Settings are read as one flat list.** If two services use the same variable name with different values, the last one read wins. The order is `.defaults`, then other files, then `docker/.env`, as in Dify.
+- **Settings are read as one flat list.** If two services use the same variable name with different values, the last one read wins. The order is `.defaults`, then the legacy `shared.env` (1.19 and older), then other service files, then `docker/.env`, as in Dify.
 - **Some values can't be read.** Values that come from elsewhere (`${VAR}` without a value in your files, Kubernetes `valueFrom`, `$(command)`, shell variables) are treated as unknown and not judged. The agent sandbox check needs `docker/.env` (or the sandbox container's `docker inspect`) to say whether a token is set.
 - **Not a scanner or a certification.** This is general technical information. It doesn't scan networks or test for vulnerabilities.
 
@@ -176,13 +190,13 @@ Also by MV2: [openwebui-hardening-check](https://github.com/munimtechnologies/op
 ## Development
 
 ```sh
-python3 -m unittest test_dify_hardening_check.py test_action.py
+python3 -m unittest test_dify_hardening_check.py test_dify_layout_120.py test_action.py
 ```
 
 Apache-2.0 licensed. Sources:
 - Dify's [environment variable docs](https://docs.dify.ai/en/self-host/deploy/configuration/environments) and [docker/README.md](https://github.com/langgenius/dify/blob/main/docker/README.md) (env file layout and precedence)
 - the [`docker/.env.example`](https://github.com/langgenius/dify/blob/main/docker/.env.example), `docker/envs/**/*.defaults` and compose files
-- [Dify's security advisories](https://github.com/langgenius/dify/security/advisories) and the [1.18.0](https://github.com/langgenius/dify/releases/tag/1.18.0) and [1.19.0](https://github.com/langgenius/dify/releases/tag/1.19.0) release notes
+- [Dify's security advisories](https://github.com/langgenius/dify/security/advisories) and the [1.18.0](https://github.com/langgenius/dify/releases/tag/1.18.0), [1.19.0](https://github.com/langgenius/dify/releases/tag/1.19.0) and [1.20.0](https://github.com/langgenius/dify/releases/tag/1.20.0) release notes
 - [CVE-2025-56157](https://nvd.nist.gov/vuln/detail/CVE-2025-56157) on the published PostgreSQL password
 - [langgenius/dify#38609](https://github.com/langgenius/dify/issues/38609) on the local sandbox's optional token
 
